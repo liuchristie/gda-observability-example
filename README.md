@@ -11,7 +11,7 @@ The [ADK BigQuery Agent Analytics plugin](https://adk.dev/integrations/bigquery-
 NOTE: Gemini Data Analytics will include managed observability via pre-built dashboards in GCP in the future. However, for end-to-end observability for API use within custom applications, this plugin still offers value add on top of the managed offering.  
 
 
-#  Broilerplate agents-cli Generated Content Below 
+#  Boilerplate agents-cli Generated Content Below 
 Agent generated with `agents-cli` version `0.2.0`
 
 ## Project Structure
