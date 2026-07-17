@@ -36,6 +36,8 @@ WITH trace_metrics AS (
     SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.input_tokens']) AS INT64)) AS input_tokens,
     SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.output_tokens']) AS INT64)) AS output_tokens,
     SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.cache_read.input_tokens']) AS INT64)) AS cache_read_tokens,
+    ROUND(SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.input_tokens']) AS INT64))/ 1000000.0 * 3.00, 4) AS input_cost_usd,
+    ROUND( SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.output_tokens']) AS INT64))/1000000.0 * 20.00, 4) AS output_cost_usd,
     TIMESTAMP_DIFF(MAX(end_time), MIN(start_time), MILLISECOND) AS response_time_ms,
     MAX(JSON_VALUE(attributes['gen_ai.agent.name'])) AS model_name
   FROM
@@ -81,9 +83,10 @@ SELECT
   IFNULL(t.cache_read_tokens, 0) AS cache_read_tokens,
   a.chat_response,
   IFNULL(t.model_name, 'ConversationalAnalyticsAgent') AS model_name,
-  -- Calculate cost logic here if desired, otherwise default to 0
-  0.0 AS estimated_cost_credits,
-  0.0 AS estimated_cost_usd,
+  -- Cost Breakdown in USD ($3.00 / 1M input, $20.00 / 1M output)
+  t.input_cost_usd,
+  t.output_cost_usd,
+  t.input_cost_usd + t.output_cost_usd AS total_cost_usd,
   COUNT(*) OVER (PARTITION BY a.session_id) AS thread_length
 FROM
   adk_events a
