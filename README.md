@@ -9,11 +9,11 @@ The [ADK BigQuery Agent Analytics plugin](https://adk.dev/integrations/bigquery-
 
 ## Update 07/07/26
 
-To use one consistent trace_id across ADK app and Conversational Analytics API traces: 
+Replicate legacy Snowflake schema for agent observability:
 
 1. [Create a Cloud Trace linked BigQuery dataset](https://docs.cloud.google.com/trace/docs/analytics-query-linked-dataset)
 
-2. Inject the OpenTelemetry trace context into the gRPC metadata for your call to client.chat():
+2. Inject the OpenTelemetry trace context into the gRPC metadata for your call to client.chat() (prevents GDA observability from creating a new trace_id):
 
 ```python
 from opentelemetry import trace
