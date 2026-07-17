@@ -12,10 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
+from opentelemetry import trace
 import datetime
 from zoneinfo import ZoneInfo
-
+from google.protobuf import json_format
 from google.adk.agents import Agent, BaseAgent
 from google.adk.apps import App
 from google.adk.models import Gemini
@@ -40,6 +40,9 @@ import os
 import google.auth
 from app.config import *
 from dotenv import load_dotenv
+from typing import Any
+from opentelemetry import trace as otel_trace
+from opentelemetry.propagate import inject as otel_inject
 
 load_dotenv()
 
@@ -48,12 +51,40 @@ os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
 
+def _message_to_dict(message: Any) -> dict[str, Any]:
+    proto_message = getattr(message, "_pb", message)
+    return json_format.MessageToDict(
+        proto_message,
+        preserving_proto_field_name=True,
+    )
+
+def _message_to_history_dict(message: geminidataanalytics.Message) -> dict[str, Any]:
+    """Serializes a CA API Message proto to a JSON-safe dict for session state."""
+    return _message_to_dict(message)
+ 
+ 
+def _history_dict_to_message(data: dict[str, Any]) -> geminidataanalytics.Message:
+    """Rebuilds a CA API Message proto from a dict stored in session state."""
+    return geminidataanalytics.Message(data)
+
+
+def _load_history(ctx: InvocationContext) -> list[dict[str, Any]]:
+    history = ctx.session.state.get("ca_conversations", [])
+    return list(history) if isinstance(history, list) else []
+
+def _save_history(ctx: InvocationContext, history: list[dict[str, Any]]) -> None:
+    if len(history) > MAX_HISTORY:
+        history = history[-MAX_HISTORY:]
+    ctx.session.state["ca_conversations"] = history
+
 
 class DataAgent(BaseAgent):
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
         question = ""
         if ctx.user_content and ctx.user_content.parts:
+
             question = "\n".join(p.text for p in ctx.user_content.parts if p.text)
+
         
         if not question:
             yield Event(author=self.name, content=types.Content(role="model", parts=[types.Part.from_text(text="Error: No user question provided.")]))
@@ -84,18 +115,12 @@ class DataAgent(BaseAgent):
             credentials.oauth.secret.client_secret = os.environ["LOOKERSDK_CLIENT_SECRET"]
             data_agent_context.credentials = credentials
 
-        messages = []
-        # NOTE - Using the built-in in-memory session service for multi-turn history for convenience. 
-        if hasattr(ctx.session, "messages"):
-            for msg in ctx.session.messages:
-                text = "".join([p.text for p in msg.content.parts if p.text])
-                if msg.author == "user":
-                    messages.append(geminidataanalytics.Message(user_message={"text": text}))
-                else:
-                    messages.append(geminidataanalytics.Message(model_message={"text": text}))
-        
-        # Append the current question
-        messages.append(geminidataanalytics.Message(user_message={"text": question}))
+        history = _load_history(ctx)
+        history_messages = [_history_dict_to_message(h) for h in history]
+        current_msg = geminidataanalytics.Message(user_message={"text": question})
+        messages = history_messages + [current_msg]
+        turn_dicts = history + [_message_to_history_dict(current_msg)]
+        print(messages)
 
         request = geminidataanalytics.ChatRequest(
             parent=parent,
@@ -116,14 +141,17 @@ class DataAgent(BaseAgent):
                     if "data" in message_dict:
                         if "generated_sql" in message_dict["data"]:
                             sql = message_dict["data"]["generated_sql"]
+                            turn_dicts.append({QUERY_KEY: sql})
                             yield Event(author=self.name, invocation_id=ctx.invocation_id, turn_complete=False, partial=False, content=types.Content(role="model", parts=[types.Part.from_text(text=f"**Query Reference**:\n\n```sql\n{sql}\n```\n")]))
                         
                         if "query" in message_dict["data"] and "looker" in message_dict["data"]["query"]:
                             looker_query = message_dict["data"]["query"]["looker"]
+                            turn_dicts.append({QUERY_KEY: looker_query})
                             yield Event(author=self.name, invocation_id=ctx.invocation_id, turn_complete=False, partial=False, content=types.Content(role="model", parts=[types.Part.from_text(text=f"**Looker Query**:\n\n```json\n{looker_query}\n```\n")]))
  
                         if "result" in message_dict["data"]:
                             data = message_dict["data"]["result"]["data"]
+                            turn_dicts.append({DATA_RESULT_KEY: data})
                             df_raw = pd.DataFrame(data)
                             total_rows = len(df_raw)
                             df_md = df_raw.head(10).to_markdown(index=False)
@@ -135,6 +163,7 @@ class DataAgent(BaseAgent):
         
                     if "chart" in message_dict and "result" in message_dict["chart"]:
                         vega_config = message_dict["chart"]["result"]["vega_config"]
+                        turn_dicts.append({CHART_KEY: vega_config})
                         if isinstance(vega_config, dict):
                             vega_config = json.dumps(vega_config)
             
@@ -151,10 +180,11 @@ class DataAgent(BaseAgent):
                     if "text" in message_dict:
                         text_type = message_dict["text"].get("text_type", "")
                         full_text = "".join(message_dict["text"].get("parts", []))
+                        turn_dicts.append({TEXT_RESULT_KEY: full_text})
                         
                         if text_type == "THOUGHT" or text_type == 2:
                             yield Event(author=self.name, invocation_id=ctx.invocation_id, partial=False, turn_complete=False, content=types.Content(role="model", parts=[types.Part.from_text(text=f"\n*Thought: {full_text}*\n")]))
-                        elif text_type == "FOLLOWUP_QUESTIONS" or text_type == 3:
+                        elif text_type == "FOLLOWUP_QUESTIONS" or text_type == 4:
                             yield Event(author=self.name, invocation_id=ctx.invocation_id, partial=False, turn_complete=False, content=types.Content(role="model", parts=[types.Part.from_text(text=f"\n**Follow-up Questions**:\n{full_text}\n")]))
                         elif text_type == "FINAL_RESPONSE" or text_type == 1:
                             yield Event(author=self.name, invocation_id=ctx.invocation_id, partial=False, turn_complete=False, content=types.Content(role="model", parts=[types.Part.from_text(text=f"\n{full_text}\n")]))
@@ -166,6 +196,7 @@ class DataAgent(BaseAgent):
             response = {"status": "error", "message": str(e)}
 
         ctx.session.state["data_agent_response"] = response
+        _save_history(ctx, turn_dicts)
         
         if response.get("status") == "error":
             yield Event(
