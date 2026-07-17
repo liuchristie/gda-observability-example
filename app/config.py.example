@@ -1,6 +1,6 @@
 DATA_AGENTS_LOCATION="global"
-DATA_AGENTS_PROJECT="liuchristie-142-20250922213141"
-DATA_AGENT_ID="bq-label-insights"
+DATA_AGENTS_PROJECT=""
+DATA_AGENT_ID=""
 DATA_RESULT_KEY="data_result"
 TEXT_RESULT_KEY="text_insights"
 CHART_KEY="chart_specs"
