@@ -7,90 +7,90 @@ ADK implements OTel Semantic Conventions for GenAI by default, emitting standard
 The [ADK BigQuery Agent Analytics plugin](https://adk.dev/integrations/bigquery-agent-analytics/) provides a more robust implementation to capture more in-depth agent behavioral analysis. 
 - This example uses default configs. See documentation for customization options. 
 
+## Update 07/07/26
 
-NOTE: Gemini Data Analytics will include managed observability via pre-built dashboards in GCP in the future. However, for end-to-end observability for API use within custom applications, this plugin still offers value add on top of the managed offering.  
+To use one consistent trace_id across ADK app and Conversational Analytics API traces: 
 
+1. [Create a Cloud Trace linked BigQuery dataset](https://docs.cloud.google.com/trace/docs/analytics-query-linked-dataset)
 
-#  Boilerplate agents-cli Generated Content Below 
-Agent generated with `agents-cli` version `0.2.0`
+2. Inject the OpenTelemetry trace context into the gRPC metadata for your call to client.chat():
 
-## Project Structure
-
-```
-ca-agent-obs/
-├── app/         # Core agent code
-│   ├── agent.py               # Main agent logic
-│   └── app_utils/             # App utilities and helpers
-├── tests/                     # Unit, integration, and load tests
-├── GEMINI.md                  # AI-assisted development guide
-└── pyproject.toml             # Project dependencies
-```
-
-> 💡 **Tip:** Use [Gemini CLI](https://github.com/google-gemini/gemini-cli) for AI-assisted development - project context is pre-configured in `GEMINI.md`.
-
-## Requirements
-
-Before you begin, ensure you have:
-- **uv**: Python package manager (used for all dependency management in this project) - [Install](https://docs.astral.sh/uv/getting-started/installation/) ([add packages](https://docs.astral.sh/uv/concepts/dependencies/) with `uv add <package>`)
-- **agents-cli**: Agents CLI - Install with `uv tool install google-agents-cli`
-- **Google Cloud SDK**: For GCP services - [Install](https://cloud.google.com/sdk/docs/install)
+```python
+from opentelemetry import trace
+from opentelemetry.propagate import inject as otel_inject
 
 
-## Quick Start
+headers = {}
+otel_inject(headers)
+metadata = tuple(headers.items())
 
-Install `agents-cli` and its skills if not already installed:
-
-```bash
-uvx google-agents-cli setup
+try:
+  stream = await client.chat(request=request, timeout=400, metadata=metadata)
 ```
 
-Install required packages:
-
-```bash
-agents-cli install
+3. Create custom views in BigQuery (Legacy Snowflake Schema)
+```sql
+WITH trace_metrics AS (
+  SELECT
+    trace_id,
+    SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.input_tokens']) AS INT64)) AS input_tokens,
+    SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.output_tokens']) AS INT64)) AS output_tokens,
+    SUM(CAST(JSON_VALUE(attributes['gen_ai.usage.cache_read.input_tokens']) AS INT64)) AS cache_read_tokens,
+    TIMESTAMP_DIFF(MAX(end_time), MIN(start_time), MILLISECOND) AS response_time_ms,
+    MAX(JSON_VALUE(attributes['gen_ai.agent.name'])) AS model_name
+  FROM
+    `your_project.your_trace_dataset.your_trace_table`
+  WHERE
+    name IN ('call_llm', 'generate_content', 'invocation')
+  GROUP BY
+    trace_id
+),
+adk_events AS (
+  SELECT
+    trace_id,
+    session_id,
+    invocation_id,
+    user_id AS retailer_name,
+    MIN(timestamp) AS event_timestamp,
+    -- Extract the user question from the first received message
+    MAX(CASE WHEN event_type = 'USER_MESSAGE_RECEIVED' THEN JSON_EXTRACT_SCALAR(content, '$.text_summary') ELSE NULL END) AS user_question,
+    -- Extract the agent's response
+    MAX(CASE WHEN event_type = 'AGENT_RESPONSE' THEN JSON_EXTRACT_SCALAR(content, '$.response') ELSE NULL END) AS chat_response,
+    -- Infer application name from session metadata
+    MAX(JSON_EXTRACT_SCALAR(attributes, '$.session_metadata.app_name')) AS origin_application,
+    -- Record status
+    MIN(status) AS status
+  FROM
+    `your_project.your_plugin_dataset.agent_events` 
+  GROUP BY
+    trace_id, session_id, invocation_id, user_id
+)
+SELECT
+  a.event_timestamp AS TIMESTAMP,
+  a.session_id AS thread_id,
+  NULL AS parent_message_id, -- If supported in ADK, this can be mapped
+  a.invocation_id AS message_id,
+  a.user_question,
+  IFNULL(a.origin_application, 'app') AS origin_application,
+  a.retailer_name,
+  IF(a.status = 'OK', 200, 500) AS response_status_code,
+  t.response_time_ms,
+  IFNULL(t.input_tokens, 0) AS input_tokens,
+  IFNULL(t.output_tokens, 0) AS output_tokens,
+  (IFNULL(t.input_tokens, 0) + IFNULL(t.output_tokens, 0)) AS total_tokens,
+  IFNULL(t.cache_read_tokens, 0) AS cache_read_tokens,
+  a.chat_response,
+  IFNULL(t.model_name, 'ConversationalAnalyticsAgent') AS model_name,
+  -- Calculate cost logic here if desired, otherwise default to 0
+  0.0 AS estimated_cost_credits,
+  0.0 AS estimated_cost_usd,
+  COUNT(*) OVER (PARTITION BY a.session_id) AS thread_length
+FROM
+  adk_events a
+LEFT JOIN
+  trace_metrics t ON a.trace_id = t.trace_id
+ORDER BY
+  a.event_timestamp DESC;
 ```
 
-Test the agent with a local web server:
 
-```bash
-agents-cli playground
-```
-
-You can also use features from the [ADK](https://adk.dev/) CLI with `uv run adk`.
-
-## Commands
-
-| Command              | Description                                                                                 |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `agents-cli install` | Install dependencies using uv                                                         |
-| `agents-cli playground` | Launch local development environment                                                  |
-| `agents-cli lint`    | Run code quality checks                                                               |
-| `uv run pytest tests/unit tests/integration` | Run unit and integration tests                                                        |
-
-## 🛠️ Project Management
-
-| Command | What It Does |
-|---------|--------------|
-| `agents-cli scaffold enhance` | Add CI/CD pipelines and Terraform infrastructure |
-| `agents-cli infra cicd` | One-command setup of entire CI/CD pipeline + infrastructure |
-| `agents-cli scaffold upgrade` | Auto-upgrade to latest version while preserving customizations |
-
----
-
-## Development
-
-Edit your agent logic in `app/agent.py` and test with `agents-cli playground` - it auto-reloads on save.
-
-## Deployment
-
-```bash
-gcloud config set project <your-project-id>
-agents-cli deploy
-```
-
-To add CI/CD and Terraform, run `agents-cli scaffold enhance`.
-To set up your production infrastructure, run `agents-cli infra cicd`.
-
-## Observability
-
-Built-in telemetry exports to Cloud Trace, BigQuery, and Cloud Logging.

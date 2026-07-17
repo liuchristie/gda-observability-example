@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from opentelemetry import trace
+from opentelemetry.propagate import inject as otel_inject
 import datetime
 from zoneinfo import ZoneInfo
 from google.protobuf import json_format
@@ -41,8 +42,7 @@ import google.auth
 from app.config import *
 from dotenv import load_dotenv
 from typing import Any
-from opentelemetry import trace as otel_trace
-from opentelemetry.propagate import inject as otel_inject
+
 
 load_dotenv()
 
@@ -50,6 +50,8 @@ _, project_id = google.auth.default()
 os.environ["GOOGLE_CLOUD_PROJECT"] = project_id
 os.environ["GOOGLE_CLOUD_LOCATION"] = "global"
 os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "True"
+
+
 
 def _message_to_dict(message: Any) -> dict[str, Any]:
     proto_message = getattr(message, "_pb", message)
@@ -130,9 +132,14 @@ class DataAgent(BaseAgent):
 
         response = {"status": "success"}
 
+        # Inject OpenTelemetry trace context into gRPC metadata
+        headers = {}
+        otel_inject(headers)
+        metadata = tuple(headers.items())
+
         try:
-            stream = await client.chat(request=request, timeout=400)
-            
+            stream = await client.chat(request=request, timeout=400, metadata=metadata)
+          #  stream = await client.chat(request=request, timeout=400)
             async for item in stream:
                 if item.system_message:
                     message_dict = geminidataanalytics.SystemMessage.to_dict(item.system_message)
@@ -237,6 +244,7 @@ if _project_id:
                     enabled=True,
                     gcs_bucket_name=os.environ.get("BQ_ANALYTICS_GCS_BUCKET"),
                     connection_id=os.environ.get("BQ_ANALYTICS_CONNECTION_ID"),
+
                 ),
             )
         )
